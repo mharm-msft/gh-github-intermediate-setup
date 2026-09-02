@@ -22,4 +22,8 @@ export type Classroom = {
   administrators: string[]
   /** Attendees */
   attendees: string[]
+  /** Successfully provisioned users and administrators */
+  provisioned: string[]
+  /** Users and administrators with incomplete provisioning attempts */
+  pending: string[]
 }

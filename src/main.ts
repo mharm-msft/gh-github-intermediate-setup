@@ -1,10 +1,7 @@
 import * as core from '@actions/core'
 import { Octokit } from '@octokit/rest'
-import * as fs from 'fs'
-import path from 'path'
 import * as actions from './actions.js'
 import { AllowedAction } from './enums.js'
-import { generateRepoName } from './github/repos.js'
 import { getClassroom, getInputs, updateClassroom } from './inputs.js'
 
 export async function run(): Promise<void> {
@@ -48,18 +45,9 @@ export async function run(): Promise<void> {
       await actions.addAdmin(octokit, classroom, inputs.handle!)
     else if (inputs.action === AllowedAction.REMOVE_ADMIN)
       await actions.removeAdmin(octokit, classroom, inputs.handle!)
-
-    updateClassroom(classroom)
-
-    /* istanbul ignore next */
-    for (const user of [...classroom.attendees, ...classroom.administrators]) {
-      const repoName = generateRepoName(classroom, user)
-      const repoPath = path.join(process.cwd(), repoName)
-
-      if (fs.existsSync(repoPath))
-        fs.rmSync(repoPath, { recursive: true, force: true })
-    }
   } catch (error: any) {
     core.error(error)
+  } finally {
+    updateClassroom(classroom)
   }
 }

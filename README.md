@@ -5,8 +5,11 @@ includes automation to drive the creation and management of training deliveries.
 
 ## Prerequisites
 
-- Node.js 20.x or later
-- A GitHub organization to host the class
+- Node.js 22.9.0 (the version in [`.node-version`](./.node-version))
+- A dedicated GitHub organization used only for the class
+- The controlled
+  [`mharm-msft/gh-github-intermediate-template`](https://github.com/mharm-msft/gh-github-intermediate-template)
+  repository must remain configured as a template repository
 - A GitHub personal access token with the following scopes:
   - `repo` (Full control of private repositories)
   - `admin:org` (Full control of orgs and teams, read and write org projects)
@@ -18,11 +21,13 @@ includes automation to drive the creation and management of training deliveries.
 1. Install the dependencies:
 
    ```sh
-   npm install
+   npm ci
    ```
 
-1. Update the [`classroom.json`](./classroom.json) file with the class
-   information (see below).
+1. Copy [`classroom.example.json`](./classroom.example.json) to
+   `classroom.json`, then update it with the class information (see below).
+   `classroom.json` is ignored by Git because it contains the participant
+   roster.
 1. Create an environment variable, `GITHUB_TOKEN`, with your GitHub personal
    access token. This can be done in your terminal:
 
@@ -32,18 +37,31 @@ includes automation to drive the creation and management of training deliveries.
 
    > [!NOTE]
    >
-   > If you are using Windows, you can set the environment variable using the
-   > following command:
+   > If you are using PowerShell on Windows, use a masked prompt and remove the
+   > token from the environment after the command completes:
    >
-   > ```sh
-   > set GITHUB_TOKEN=your_token_here
+   > ```powershell
+   > $securePat = Read-Host "Short-lived GitHub PAT" -AsSecureString
+   > $env:GITHUB_TOKEN = [Net.NetworkCredential]::new("", $securePat).Password
+   > try {
+   >   node .\dist\index.js create
+   > } finally {
+   >   Remove-Item Env:GITHUB_TOKEN -ErrorAction SilentlyContinue
+   > }
    > ```
+
+> [!WARNING]
+>
+> Use a dedicated training organization. The class team receives administrator
+> access to every generated repository. Closing the class deletes all
+> roster-derived class repositories, removes non-administrator attendees from
+> the organization, and deletes the class team.
 
 ## JSON File
 
-The [`classroom.json`](./classroom.json) file is used to define the class and
-its attendees/administrators. Before running any commands, you must update this
-file with the following information:
+The local `classroom.json` file is used to define the class and its
+attendees/administrators. Before running any commands, you must update this file
+with the following information:
 
 ```jsonc
 {
@@ -63,7 +81,10 @@ file with the following information:
   "administrators": ["admin"],
   // The list of GitHub handles for class attendees. These users will be added
   // as members to the class team and will have access to all repositories.
-  "attendees": ["mona"]
+  "attendees": ["mona"],
+  // Internal state maintained by the provisioner. Leave empty before create.
+  "provisioned": [],
+  "pending": []
 }
 ```
 
@@ -71,7 +92,15 @@ file with the following information:
 >
 > As you run various commands, the `classroom.json` file will be updated with
 > the current state of the class. This includes the list of attendees and
-> administrators.
+> administrators and the internal provisioning manifest. Keep this file for the
+> entire class lifecycle so retries and `close` operate on the exact persisted
+> state.
+
+If an add operation reports `Incomplete Repository Requires Cleanup`, inspect
+the named repository before deleting it. The provisioner will not automatically
+delete a repository left by a previous process. After deliberate cleanup, rerun
+the same add command; its persisted `pending` state allows provisioning to
+resume without losing the roster entry.
 
 ## Available Actions
 
@@ -103,7 +132,7 @@ node dist/index.js close
 
 The following actions are performed:
 
-1. Deletes the all class repositories
+1. Deletes the class repositories derived from the persisted roster
 1. Removes all non-administrator users from the organization
 1. Deletes the class team
 

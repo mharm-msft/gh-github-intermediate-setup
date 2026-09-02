@@ -78,7 +78,11 @@ describe('teams', () => {
     it('Creates a team', async () => {
       await teams.create(mocktokit, TEST_CLASSROOM)
 
-      expect(mocktokit.rest.teams.create).toHaveBeenCalled()
+      expect(mocktokit.rest.teams.create).toHaveBeenCalledWith({
+        org: TEST_CLASSROOM.organization,
+        name: 'gh-int-tc',
+        privacy: 'closed'
+      })
       expect(
         mocktokit.rest.teams.addOrUpdateMembershipForUserInOrg
       ).toHaveBeenCalledTimes(5)

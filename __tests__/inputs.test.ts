@@ -3,6 +3,7 @@ import * as core from '../__fixtures__/@actions/core.js'
 import { TEST_CLASSROOM } from '../__fixtures__/common.js'
 import fs from '../__fixtures__/fs.js'
 import { AllowedAction } from '../src/enums.js'
+import path from 'path'
 
 jest.unstable_mockModule('@actions/core', () => core)
 jest.unstable_mockModule('fs', () => fs)
@@ -158,6 +159,26 @@ describe('inputs.ts', () => {
 
       expect(result).toMatchObject(TEST_CLASSROOM)
     })
+
+    it('Treats a legacy roster as provisioned when state is missing', () => {
+      const legacyClassroom = {
+        ...TEST_CLASSROOM,
+        provisioned: undefined,
+        pending: undefined
+      }
+      fs.existsSync.mockReturnValue(true)
+      fs.readFileSync.mockReturnValue(JSON.stringify(legacyClassroom))
+
+      const result = inputs.getClassroom()
+
+      expect(result?.provisioned).toEqual([
+        'admin1',
+        'attendee1',
+        'attendee2',
+        'admin2'
+      ])
+      expect(result?.pending).toEqual([])
+    })
   })
 
   describe('updateClassroom()', () => {
@@ -165,7 +186,7 @@ describe('inputs.ts', () => {
       inputs.updateClassroom(TEST_CLASSROOM)
 
       expect(fs.writeFileSync).toHaveBeenCalledWith(
-        expect.any(String),
+        path.resolve(process.cwd(), 'classroom.json'),
         JSON.stringify(TEST_CLASSROOM, null, 2),
         'utf8'
       )

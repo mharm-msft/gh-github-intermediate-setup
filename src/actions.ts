@@ -6,6 +6,52 @@ import * as teams from './github/teams.js'
 import * as users from './github/users.js'
 import type { Classroom } from './types.js'
 
+async function createAndConfigureRepository(
+  octokit: InstanceType<typeof Octokit>,
+  classroom: Classroom,
+  handle: string
+): Promise<string> {
+  const repo = await repos.create(octokit, classroom, handle)
+
+  try {
+    // Wait for the repository and initial commit to become available.
+    /* istanbul ignore next */
+    if (process.env.NODE_ENV !== 'test')
+      await new Promise((resolve) => setTimeout(resolve, 10000))
+
+    await repos.configure(octokit, classroom, repo)
+    return repo
+  } catch (error) {
+    try {
+      if (await repos.exists(octokit, classroom, handle))
+        await octokit.rest.repos.delete({
+          owner: classroom.organization,
+          repo
+        })
+    } catch (cleanupError) {
+      throw new AggregateError(
+        [error, cleanupError],
+        `Failed to configure and clean up repository: ${repo}`
+      )
+    }
+
+    throw error
+  }
+}
+
+function beginProvisioning(classroom: Classroom, handle: string): void {
+  classroom.provisioned = classroom.provisioned.filter(
+    (user) => user !== handle
+  )
+  if (!classroom.pending.includes(handle)) classroom.pending.push(handle)
+}
+
+function completeProvisioning(classroom: Classroom, handle: string): void {
+  if (!classroom.provisioned.includes(handle))
+    classroom.provisioned.push(handle)
+  classroom.pending = classroom.pending.filter((user) => user !== handle)
+}
+
 /**
  * Creates a classroom.
  *
@@ -24,8 +70,13 @@ export async function createClass(
     return
   }
 
+  // Get the unique list of users (attendees and administrators).
+  const users = [
+    ...new Set([...classroom.attendees, ...classroom.administrators])
+  ]
+
   // Check if any user repositories already exist.
-  for (const user of classroom.attendees) {
+  for (const user of users) {
     if (await repos.exists(octokit, classroom, user)) {
       core.error(
         `Repository Already Exists: ${repos.generateRepoName(classroom, user)}`
@@ -37,21 +88,11 @@ export async function createClass(
   // Create the team and add the users.
   await teams.create(octokit, classroom)
 
-  // Get the unique list of users (attendees and administrators).
-  const users = [
-    ...new Set([...classroom.attendees, ...classroom.administrators])
-  ]
-
   // Create and configure the user repositories.
   for (const user of users) {
-    const repo = await repos.create(octokit, classroom, user)
-
-    // Sleep 5s to wait for the repo to be created and initial commit pushed.
-    /* istanbul ignore next */
-    if (process.env.NODE_ENV !== 'test')
-      await new Promise((resolve) => setTimeout(resolve, 10000))
-
-    await repos.configure(octokit, classroom, repo)
+    beginProvisioning(classroom, user)
+    await createAndConfigureRepository(octokit, classroom, user)
+    completeProvisioning(classroom, user)
   }
 
   core.info('')
@@ -127,31 +168,40 @@ export async function addUser(
 ): Promise<void> {
   core.info(`\tAdding User to Classroom: ${handle}`)
 
-  // Check if the user is already in the team and the repository already exists.
-  /* istanbul ignore next */
-  if (
-    (await repos.exists(octokit, classroom, handle)) &&
-    (classroom.attendees.includes(handle) ||
-      classroom.administrators.includes(handle))
-  ) {
+  const repoExists = await repos.exists(octokit, classroom, handle)
+  const isRostered =
+    classroom.attendees.includes(handle) ||
+    classroom.administrators.includes(handle)
+
+  if (repoExists && classroom.provisioned.includes(handle)) {
+    if (!isRostered)
+      throw new Error(`Provisioned user is missing from the roster: ${handle}`)
+
     core.info(`User Already Added: ${handle}`)
     return
   }
 
+  if (repoExists) {
+    if (!isRostered || !classroom.pending.includes(handle))
+      throw new Error(`Repository Already Exists: ${handle}`)
+    throw new Error(`Incomplete Repository Requires Cleanup: ${handle}`)
+  }
+
+  // Record the handle before provisioning so the caller can persist failures.
+  if (!isRostered) classroom.attendees.push(handle)
+  beginProvisioning(classroom, handle)
+
   // Add the user to the team.
-  await teams.addUser(octokit, classroom, handle, 'member')
+  await teams.addUser(
+    octokit,
+    classroom,
+    handle,
+    classroom.administrators.includes(handle) ? 'maintainer' : 'member'
+  )
 
   // Create and configure their repository.
-  const repo = await repos.create(octokit, classroom, handle)
-
-  // Sleep 5s to wait for the repo to be created and initial commit pushed.
-  /* istanbul ignore next */
-  if (process.env.NODE_ENV !== 'test')
-    await new Promise((resolve) => setTimeout(resolve, 10000))
-
-  await repos.configure(octokit, classroom, repo)
-
-  classroom.attendees.push(handle)
+  await createAndConfigureRepository(octokit, classroom, handle)
+  completeProvisioning(classroom, handle)
 
   core.info(dedent`Added User to Classroom: ${handle}
 
@@ -226,6 +276,10 @@ export async function removeUser(
 
   // Remove from the attendees list.
   classroom.attendees = classroom.attendees.filter((user) => user !== handle)
+  classroom.provisioned = classroom.provisioned.filter(
+    (user) => user !== handle
+  )
+  classroom.pending = classroom.pending.filter((user) => user !== handle)
 
   core.info(`Removed User from Class Request: ${handle}`)
 }
@@ -244,30 +298,43 @@ export async function addAdmin(
 ): Promise<void> {
   core.info(`Adding Admin to Classroom: ${handle}`)
 
-  // Check if the user is already in the team and the repository already exists.
-  /* istanbul ignore next */
-  if (
-    (await repos.exists(octokit, classroom, handle)) &&
-    classroom.administrators.includes(handle)
-  ) {
-    core.info(`Admin Already Added: ${handle}`)
+  const repoExists = await repos.exists(octokit, classroom, handle)
+  const isAdmin = classroom.administrators.includes(handle)
+  const isAttendee = classroom.attendees.includes(handle)
+  const isRostered = isAdmin || isAttendee
+
+  if (repoExists && classroom.provisioned.includes(handle)) {
+    if (isAdmin) {
+      core.info(`Admin Already Added: ${handle}`)
+      return
+    }
+    if (!isAttendee)
+      throw new Error(`Provisioned user is missing from the roster: ${handle}`)
+
+    await teams.addUser(octokit, classroom, handle, 'maintainer')
+    classroom.administrators.push(handle)
+    classroom.pending = classroom.pending.filter((user) => user !== handle)
+    core.info(`Promoted User to Admin: ${handle}`)
     return
   }
+
+  if (repoExists) {
+    if (!isRostered || !classroom.pending.includes(handle))
+      throw new Error(`Repository Already Exists: ${handle}`)
+    throw new Error(`Incomplete Repository Requires Cleanup: ${handle}`)
+  }
+
+  // Record the handle before provisioning so the caller can persist failures.
+  if (!classroom.administrators.includes(handle))
+    classroom.administrators.push(handle)
+  beginProvisioning(classroom, handle)
 
   // Add the user to the team.
   await teams.addUser(octokit, classroom, handle, 'maintainer')
 
   // Create and configure their repository.
-  const repo = await repos.create(octokit, classroom, handle)
-
-  // Sleep 5s to wait for the repo to be created and initial commit pushed.
-  /* istanbul ignore next */
-  if (process.env.NODE_ENV !== 'test')
-    await new Promise((resolve) => setTimeout(resolve, 10000))
-
-  await repos.configure(octokit, classroom, repo)
-
-  classroom.administrators.push(handle)
+  await createAndConfigureRepository(octokit, classroom, handle)
+  completeProvisioning(classroom, handle)
 
   core.info(dedent`Added Admin to Classroom: ${handle}
 
@@ -348,6 +415,10 @@ export async function removeAdmin(
   classroom.administrators = classroom.administrators.filter(
     (user) => user !== handle
   )
+  classroom.provisioned = classroom.provisioned.filter(
+    (user) => user !== handle
+  )
+  classroom.pending = classroom.pending.filter((user) => user !== handle)
 
   core.info(`Removed Admin from Class Request: ${handle}`)
 }

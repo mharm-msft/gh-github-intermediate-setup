@@ -69,7 +69,8 @@ export async function create(
   // Create the team. Add the class administrators as maintainers.
   await octokit.rest.teams.create({
     org: classroom.organization,
-    name: generateTeamName(classroom)
+    name: generateTeamName(classroom),
+    privacy: 'closed'
   })
 
   // Add the attendees to the team.

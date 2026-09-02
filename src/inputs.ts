@@ -114,6 +114,20 @@ export function getClassroom(): Classroom | undefined {
       return undefined
     }
 
+    const administrators = parsedFile.administrators.map((admin: string) =>
+      admin.trim()
+    )
+    const attendees = parsedFile.attendees.map((attendee: string) =>
+      attendee.trim()
+    )
+    const provisioned =
+      parsedFile.provisioned === undefined
+        ? [...new Set([...attendees, ...administrators])]
+        : parsedFile.provisioned.map((handle: string) => handle.trim())
+    const pending = (parsedFile.pending ?? []).map((handle: string) =>
+      handle.trim()
+    )
+
     return {
       githubServer:
         /* istanbul ignore next */ parsedFile.githubServer?.trim() ||
@@ -121,10 +135,10 @@ export function getClassroom(): Classroom | undefined {
       organization: parsedFile.organization.trim(),
       customerName: parsedFile.customerName.trim(),
       customerAbbr: parsedFile.customerAbbr.trim().toUpperCase(),
-      administrators: parsedFile.administrators.map((admin: string) =>
-        admin.trim()
-      ),
-      attendees: parsedFile.attendees.map((attendee: string) => attendee.trim())
+      administrators,
+      attendees,
+      provisioned,
+      pending
     }
   } catch (error) {
     /* istanbul ignore next */
@@ -142,7 +156,7 @@ export function getClassroom(): Classroom | undefined {
  */
 export function updateClassroom(classroom: Classroom): void {
   fs.writeFileSync(
-    path.resolve('../classroom.json'),
+    path.resolve(process.cwd(), 'classroom.json'),
     JSON.stringify(classroom, null, 2),
     'utf8'
   )

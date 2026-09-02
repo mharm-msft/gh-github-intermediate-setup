@@ -17,7 +17,7 @@ export enum AllowedAction {
 /** Common Constants */
 export enum Common {
   /** Organization */
-  TEMPLATE_OWNER = 'githubschool',
-  /** Template Repositoriy */
+  TEMPLATE_OWNER = 'mharm-msft',
+  /** Template Repository */
   TEMPLATE_REPO = 'gh-github-intermediate-template'
 }
