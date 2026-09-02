@@ -4,5 +4,7 @@
   "customerName": "Customer Name",
   "customerAbbr": "CN",
   "administrators": ["admin"],
-  "attendees": ["mona"]
+  "attendees": ["mona"],
+  "provisioned": [],
+  "pending": []
 }

@@ -47,6 +47,16 @@ jest.unstable_mockModule('../src/actions.js', () => ({
 }))
 
 const main = await import('../src/main.js')
+const classroom: Classroom = {
+  githubServer: 'github.com',
+  organization: 'test-org',
+  customerName: 'Test Customer',
+  customerAbbr: 'TC',
+  attendees: [],
+  administrators: [],
+  provisioned: [],
+  pending: []
+}
 
 describe('main', () => {
   beforeEach(() => {
@@ -100,7 +110,7 @@ describe('main', () => {
     getInputs.mockReturnValue({
       action: AllowedAction.CREATE
     })
-    getClassroom.mockReturnValue({} as Classroom)
+    getClassroom.mockReturnValue(classroom)
 
     await main.run()
 
@@ -111,7 +121,7 @@ describe('main', () => {
     getInputs.mockReturnValue({
       action: AllowedAction.CLOSE
     })
-    getClassroom.mockReturnValue({} as Classroom)
+    getClassroom.mockReturnValue(classroom)
 
     await main.run()
 
@@ -123,11 +133,11 @@ describe('main', () => {
       action: AllowedAction.ADD_USER,
       handle: 'test'
     })
-    getClassroom.mockReturnValue({} as Classroom)
+    getClassroom.mockReturnValue(classroom)
 
     await main.run()
 
-    expect(addUser).toHaveBeenCalledWith(expect.anything(), {}, 'test')
+    expect(addUser).toHaveBeenCalledWith(expect.anything(), classroom, 'test')
   })
 
   it('Processes the remove user action', async () => {
@@ -135,11 +145,15 @@ describe('main', () => {
       action: AllowedAction.REMOVE_USER,
       handle: 'test'
     })
-    getClassroom.mockReturnValue({} as Classroom)
+    getClassroom.mockReturnValue(classroom)
 
     await main.run()
 
-    expect(removeUser).toHaveBeenCalledWith(expect.anything(), {}, 'test')
+    expect(removeUser).toHaveBeenCalledWith(
+      expect.anything(),
+      classroom,
+      'test'
+    )
   })
 
   it('Processes the add admin action', async () => {
@@ -147,11 +161,11 @@ describe('main', () => {
       action: AllowedAction.ADD_ADMIN,
       handle: 'test'
     })
-    getClassroom.mockReturnValue({} as Classroom)
+    getClassroom.mockReturnValue(classroom)
 
     await main.run()
 
-    expect(addAdmin).toHaveBeenCalledWith(expect.anything(), {}, 'test')
+    expect(addAdmin).toHaveBeenCalledWith(expect.anything(), classroom, 'test')
   })
 
   it('Processes the remove admin action', async () => {
@@ -159,18 +173,22 @@ describe('main', () => {
       action: AllowedAction.REMOVE_ADMIN,
       handle: 'test'
     })
-    getClassroom.mockReturnValue({} as Classroom)
+    getClassroom.mockReturnValue(classroom)
 
     await main.run()
 
-    expect(removeAdmin).toHaveBeenCalledWith(expect.anything(), {}, 'test')
+    expect(removeAdmin).toHaveBeenCalledWith(
+      expect.anything(),
+      classroom,
+      'test'
+    )
   })
 
   it('Handles errors', async () => {
     getInputs.mockReturnValue({
       action: AllowedAction.CREATE
     })
-    getClassroom.mockReturnValue({} as Classroom)
+    getClassroom.mockReturnValue(classroom)
     createClass.mockImplementation(() => {
       throw new Error('Test error')
     })
@@ -178,5 +196,6 @@ describe('main', () => {
     await main.run()
 
     expect(core.error).toHaveBeenCalledWith(new Error('Test error'))
+    expect(updateClassroom).toHaveBeenCalledWith(classroom)
   })
 })

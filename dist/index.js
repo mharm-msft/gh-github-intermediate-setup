@@ -31730,8 +31730,8 @@ var AllowedAction;
 var Common;
 (function (Common) {
     /** Organization */
-    Common["TEMPLATE_OWNER"] = "githubschool";
-    /** Template Repositoriy */
+    Common["TEMPLATE_OWNER"] = "mharm-msft";
+    /** Template Repository */
     Common["TEMPLATE_REPO"] = "gh-github-intermediate-template";
 })(Common || (Common = {}));
 
@@ -31775,7 +31775,8 @@ async function create$1(octokit, classroom) {
     // Create the team. Add the class administrators as maintainers.
     await octokit.rest.teams.create({
         org: classroom.organization,
-        name: generateTeamName(classroom)
+        name: generateTeamName(classroom),
+        privacy: 'closed'
     });
     // Add the attendees to the team.
     for (const user of classroom.attendees)
@@ -31874,17 +31875,31 @@ async function create(octokit, classroom, handle) {
         owner: classroom.organization,
         name: generateRepoName(classroom, handle),
         description: `GitHub Intermediate - ${classroom.customerName}`,
-        include_all_branches: true,
+        include_all_branches: false,
         private: true
     });
-    // Grant the team access to the repository.
-    await octokit.rest.teams.addOrUpdateRepoPermissionsInOrg({
-        org: classroom.organization,
-        team_slug: generateTeamName(classroom),
-        owner: classroom.organization,
-        repo: response.data.name,
-        permission: 'admin'
-    });
+    try {
+        // Grant the team access to the repository.
+        await octokit.rest.teams.addOrUpdateRepoPermissionsInOrg({
+            org: classroom.organization,
+            team_slug: generateTeamName(classroom),
+            owner: classroom.organization,
+            repo: response.data.name,
+            permission: 'admin'
+        });
+    }
+    catch (error) {
+        try {
+            await octokit.rest.repos.delete({
+                owner: classroom.organization,
+                repo: response.data.name
+            });
+        }
+        catch (cleanupError) {
+            throw new AggregateError([error, cleanupError], `Failed to grant team access and clean up repository: ${response.data.name}`);
+        }
+        throw error;
+    }
     return response.data.name;
 }
 /**
@@ -31905,6 +31920,7 @@ async function exists(octokit, classroom, handle) {
     catch (error) {
         if (error.status === 404)
             return false;
+        throw error;
     }
     return true;
 }
@@ -31935,9 +31951,10 @@ async function configure(octokit, classroom, repo) {
         repo,
         homepage: response.data.html_url
     });
+    const tempRoot = fs__default.mkdtempSync(path.join(require$$0.tmpdir(), 'gh-int-'));
     // Configure the exec options.
     const options = {
-        cwd: process.cwd(),
+        cwd: tempRoot,
         listeners: {
             stdout: (data) => { },
             stderr: (data) => {
@@ -31952,32 +31969,56 @@ async function configure(octokit, classroom, repo) {
         },
         silent: true
     };
-    // Clone the repository to the local workspace.
-    await execExports.exec('git', [
-        'clone',
-        `https://x-access-token:${process.env.GITHUB_TOKEN}@${classroom.githubServer}/${classroom.organization}/${repo}.git`
-    ], options);
-    // Update the working directory to the checked out repository.
-    options.cwd = path.resolve(process.cwd(), repo);
-    // Update the remote URL to use the token.
-    await execExports.exec('git', [
-        'remote',
-        'set-url',
-        'origin',
-        `https://x-access-token:${process.env.GITHUB_TOKEN}@${classroom.githubServer}/${classroom.organization}/${repo}.git`
-    ], options);
-    // Configure the labs
-    await configureLab1();
-    await configureLab2();
-    await configureLab3(options);
-    await configureLab4(options);
-    await configureLab5();
-    await configureLab6();
-    await configureLab7();
-    await configureLab8(options, octokit, classroom);
-    await configureLab9();
-    await configureLab10();
-    await configureLab11();
+    let configurationError;
+    try {
+        // Clone into an operation-owned temporary directory.
+        await execExports.exec('git', [
+            'clone',
+            `https://x-access-token:${process.env.GITHUB_TOKEN}@${classroom.githubServer}/${classroom.organization}/${repo}.git`
+        ], options);
+        // Update the working directory to the checked out repository.
+        options.cwd = path.join(tempRoot, repo);
+        // Update the remote URL to use the token.
+        await execExports.exec('git', [
+            'remote',
+            'set-url',
+            'origin',
+            `https://x-access-token:${process.env.GITHUB_TOKEN}@${classroom.githubServer}/${classroom.organization}/${repo}.git`
+        ], options);
+        // Configure the labs.
+        await configureLab1(options, octokit, classroom);
+        await configureLab2(options, octokit, classroom);
+        await configureLab3(options, octokit, classroom);
+        await configureLab4(options, octokit, classroom);
+        await configureLab5(options, octokit, classroom);
+        await configureLab6(options, octokit, classroom);
+        await configureLab7(options, octokit, classroom);
+        await configureLab8(options, octokit, classroom, repo);
+        await configureLab9(options, octokit, classroom);
+        await configureLab10(options, octokit, classroom);
+        await configureLab11(options, octokit, classroom);
+    }
+    catch (error) {
+        configurationError = error;
+    }
+    let cleanupError;
+    try {
+        fs__default.rmSync(tempRoot, { recursive: true, force: true });
+    }
+    catch (error) {
+        cleanupError = error;
+    }
+    if (configurationError) {
+        if (cleanupError)
+            throw new AggregateError([configurationError, cleanupError], `Failed to configure repository and remove temporary directory: ${repo}`);
+        throw configurationError;
+    }
+    if (cleanupError) {
+        const message = cleanupError instanceof Error
+            ? cleanupError.message
+            : String(cleanupError);
+        coreExports.warning(`Temporary directory cleanup failed: ${message}`);
+    }
 }
 /**
  * Deletes all class repositories.
@@ -31987,17 +32028,18 @@ async function configure(octokit, classroom, repo) {
  */
 async function deleteRepositories(octokit, classroom) {
     coreExports.info(`Deleting Repositories: ${classroom.customerAbbr}`);
-    // Get the repositories for this request.
-    const prefix = `gh-int-${classroom.customerAbbr.toLowerCase()}-`;
-    const response = await octokit.rest.search.repos({
-        q: `org:${classroom.organization} ${prefix}`
-    });
-    // Delete the repositories for each member.
-    for (const repo of response.data.items) {
-        coreExports.info(`\tDeleting Repository: ${repo.name}`);
+    const handles = [
+        ...new Set([...classroom.attendees, ...classroom.administrators])
+    ];
+    // Delete only repositories derived from the persisted class roster.
+    for (const handle of handles) {
+        if (!(await exists(octokit, classroom, handle)))
+            continue;
+        const repo = generateRepoName(classroom, handle);
+        coreExports.info(`\tDeleting Repository: ${repo}`);
         await octokit.rest.repos.delete({
             owner: classroom.organization,
-            repo: repo.name
+            repo
         });
     }
 }
@@ -32041,7 +32083,7 @@ async function configureLab3(options, octokit, classroom) {
         const filename = `keyboard_input_manager.test.${i}`;
         const contents = fs__default.readFileSync(`${process.cwd()}/lab-files/3-git-bisect/${filename}`, 'utf8');
         // Remove the old file if it exists.
-        await execExports.exec('rm', ['__tests__/keyboard_input_manager.test.ts'], options);
+        fs__default.rmSync(path.join(options.cwd, '__tests__', 'keyboard_input_manager.test.ts'), { force: true });
         // Write the new file.
         fs__default.writeFileSync(`${options.cwd}/__tests__/keyboard_input_manager.test.ts`, contents, 'utf8');
         // Commit the changes.
@@ -32072,7 +32114,9 @@ async function configureLab4(options, octokit, classroom) {
     // Checkout a feature branch at the SHA.
     await execExports.exec('git', ['checkout', '-b', 'feature/animate-score', sha], options);
     // Remove the old file if it exists.
-    await execExports.exec('rm', ['src/html_actuator.ts'], options);
+    fs__default.rmSync(path.join(options.cwd, 'src', 'html_actuator.ts'), {
+        force: true
+    });
     // Write the new file.
     fs__default.writeFileSync(`${options.cwd}/src/html_actuator.ts`, contents, 'utf8');
     // Commit the changes.
@@ -32101,7 +32145,16 @@ async function configureLab5(options, octokit, classroom) {
  */
 async function configureLab6(options, octokit, classroom) {
     coreExports.info('\tConfiguring Lab 6: Protect Main');
-    // Nothing needs to be done...
+    const labPath = path.join(options.cwd, 'labs', '6-protect-main.md');
+    const codeOwnerMarker = '@<organization>/<class-team>';
+    const classCodeOwner = `@${classroom.organization}/${generateTeamName(classroom)}`;
+    const contents = fs__default.readFileSync(labPath, 'utf8');
+    if (!contents.includes(codeOwnerMarker))
+        throw new Error(`Lab 6 code owner marker not found: ${codeOwnerMarker}`);
+    fs__default.writeFileSync(labPath, contents.replaceAll(codeOwnerMarker, classCodeOwner), 'utf8');
+    await execExports.exec('git', ['add', 'labs/6-protect-main.md'], options);
+    await execExports.exec('git', ['commit', '-m', 'Configure class team as code owner'], options);
+    await execExports.exec('git', ['push'], options);
 }
 /**
  * Configure Lab 7: GitHub Flow
@@ -32121,7 +32174,7 @@ async function configureLab7(options, octokit, classroom) {
  * @param octokit Octokit Client
  * @param classroom Classroom
  */
-async function configureLab8(options, octokit, classroom) {
+async function configureLab8(options, octokit, classroom, repo) {
     coreExports.info('\tConfiguring Lab 8: Merge Conflicts');
     // Create the PRs for the first merge conflict to resolve.
     for (let i = 1; i < 3; i++) {
@@ -32131,7 +32184,9 @@ async function configureLab8(options, octokit, classroom) {
         // Checkout a feature branch.
         await execExports.exec('git', ['checkout', '-b', `feature/tile-value-${i}`], options);
         // Remove the old file if it exists.
-        await execExports.exec('rm', ['src/game_manager.ts'], options);
+        fs__default.rmSync(path.join(options.cwd, 'src', 'game_manager.ts'), {
+            force: true
+        });
         // Write the new file.
         fs__default.writeFileSync(`${options.cwd}/src/game_manager.ts`, contents, 'utf8');
         // Commit the changes.
@@ -32143,7 +32198,7 @@ async function configureLab8(options, octokit, classroom) {
         // Create the pull request.
         await octokit.rest.pulls.create({
             owner: classroom.organization,
-            repo: options.cwd.split('/').pop(),
+            repo,
             head: `feature/tile-value-${i}`,
             base: 'main',
             title: 'Increase rate of tiles with value 4',
@@ -32158,7 +32213,9 @@ async function configureLab8(options, octokit, classroom) {
         // Checkout a feature branch.
         await execExports.exec('git', ['checkout', '-b', `feature/start-tiles-${i}`], options);
         // Remove the old file if it exists.
-        await execExports.exec('rm', ['src/game_manager.ts'], options);
+        fs__default.rmSync(path.join(options.cwd, 'src', 'game_manager.ts'), {
+            force: true
+        });
         // Write the new file.
         fs__default.writeFileSync(`${options.cwd}/src/game_manager.ts`, contents, 'utf8');
         // Commit the changes.
@@ -32170,7 +32227,7 @@ async function configureLab8(options, octokit, classroom) {
         // Create the pull request.
         await octokit.rest.pulls.create({
             owner: classroom.organization,
-            repo: options.cwd.split('/').pop(),
+            repo,
             head: `feature/start-tiles-${i}`,
             base: 'main',
             title: 'Increase the number of starting tiles',
@@ -32259,6 +32316,40 @@ async function removeUsers(octokit, classroom) {
     }
 }
 
+async function createAndConfigureRepository(octokit, classroom, handle) {
+    const repo = await create(octokit, classroom, handle);
+    try {
+        // Wait for the repository and initial commit to become available.
+        /* istanbul ignore next */
+        if (process.env.NODE_ENV !== 'test')
+            await new Promise((resolve) => setTimeout(resolve, 10000));
+        await configure(octokit, classroom, repo);
+        return repo;
+    }
+    catch (error) {
+        try {
+            if (await exists(octokit, classroom, handle))
+                await octokit.rest.repos.delete({
+                    owner: classroom.organization,
+                    repo
+                });
+        }
+        catch (cleanupError) {
+            throw new AggregateError([error, cleanupError], `Failed to configure and clean up repository: ${repo}`);
+        }
+        throw error;
+    }
+}
+function beginProvisioning(classroom, handle) {
+    classroom.provisioned = classroom.provisioned.filter((user) => user !== handle);
+    if (!classroom.pending.includes(handle))
+        classroom.pending.push(handle);
+}
+function completeProvisioning(classroom, handle) {
+    if (!classroom.provisioned.includes(handle))
+        classroom.provisioned.push(handle);
+    classroom.pending = classroom.pending.filter((user) => user !== handle);
+}
 /**
  * Creates a classroom.
  *
@@ -32272,8 +32363,12 @@ async function createClass(octokit, classroom) {
         coreExports.error(`Team Already Exists: ${generateTeamName(classroom)}`);
         return;
     }
+    // Get the unique list of users (attendees and administrators).
+    const users = [
+        ...new Set([...classroom.attendees, ...classroom.administrators])
+    ];
     // Check if any user repositories already exist.
-    for (const user of classroom.attendees) {
+    for (const user of users) {
         if (await exists(octokit, classroom, user)) {
             coreExports.error(`Repository Already Exists: ${generateRepoName(classroom, user)}`);
             return;
@@ -32281,18 +32376,11 @@ async function createClass(octokit, classroom) {
     }
     // Create the team and add the users.
     await create$1(octokit, classroom);
-    // Get the unique list of users (attendees and administrators).
-    const users = [
-        ...new Set([...classroom.attendees, ...classroom.administrators])
-    ];
     // Create and configure the user repositories.
     for (const user of users) {
-        const repo = await create(octokit, classroom, user);
-        // Sleep 5s to wait for the repo to be created and initial commit pushed.
-        /* istanbul ignore next */
-        if (process.env.NODE_ENV !== 'test')
-            await new Promise((resolve) => setTimeout(resolve, 10000));
-        await configure(octokit, classroom, repo);
+        beginProvisioning(classroom, user);
+        await createAndConfigureRepository(octokit, classroom, user);
+        completeProvisioning(classroom, user);
     }
     coreExports.info('');
     coreExports.info('===============================================================');
@@ -32350,24 +32438,29 @@ async function closeClass(octokit, classroom) {
  */
 async function addUser(octokit, classroom, handle) {
     coreExports.info(`\tAdding User to Classroom: ${handle}`);
-    // Check if the user is already in the team and the repository already exists.
-    /* istanbul ignore next */
-    if ((await exists(octokit, classroom, handle)) &&
-        (classroom.attendees.includes(handle) ||
-            classroom.administrators.includes(handle))) {
+    const repoExists = await exists(octokit, classroom, handle);
+    const isRostered = classroom.attendees.includes(handle) ||
+        classroom.administrators.includes(handle);
+    if (repoExists && classroom.provisioned.includes(handle)) {
+        if (!isRostered)
+            throw new Error(`Provisioned user is missing from the roster: ${handle}`);
         coreExports.info(`User Already Added: ${handle}`);
         return;
     }
+    if (repoExists) {
+        if (!isRostered || !classroom.pending.includes(handle))
+            throw new Error(`Repository Already Exists: ${handle}`);
+        throw new Error(`Incomplete Repository Requires Cleanup: ${handle}`);
+    }
+    // Record the handle before provisioning so the caller can persist failures.
+    if (!isRostered)
+        classroom.attendees.push(handle);
+    beginProvisioning(classroom, handle);
     // Add the user to the team.
-    await addUser$1(octokit, classroom, handle, 'member');
+    await addUser$1(octokit, classroom, handle, classroom.administrators.includes(handle) ? 'maintainer' : 'member');
     // Create and configure their repository.
-    const repo = await create(octokit, classroom, handle);
-    // Sleep 5s to wait for the repo to be created and initial commit pushed.
-    /* istanbul ignore next */
-    if (process.env.NODE_ENV !== 'test')
-        await new Promise((resolve) => setTimeout(resolve, 10000));
-    await configure(octokit, classroom, repo);
-    classroom.attendees.push(handle);
+    await createAndConfigureRepository(octokit, classroom, handle);
+    completeProvisioning(classroom, handle);
     coreExports.info(dedent `Added User to Classroom: ${handle}
 
   The following repository has been created for the user:
@@ -32425,6 +32518,8 @@ async function removeUser(octokit, classroom, handle) {
     await removeUser$1(octokit, classroom, handle);
     // Remove from the attendees list.
     classroom.attendees = classroom.attendees.filter((user) => user !== handle);
+    classroom.provisioned = classroom.provisioned.filter((user) => user !== handle);
+    classroom.pending = classroom.pending.filter((user) => user !== handle);
     coreExports.info(`Removed User from Class Request: ${handle}`);
 }
 /**
@@ -32436,23 +32531,37 @@ async function removeUser(octokit, classroom, handle) {
  */
 async function addAdmin(octokit, classroom, handle) {
     coreExports.info(`Adding Admin to Classroom: ${handle}`);
-    // Check if the user is already in the team and the repository already exists.
-    /* istanbul ignore next */
-    if ((await exists(octokit, classroom, handle)) &&
-        classroom.administrators.includes(handle)) {
-        coreExports.info(`Admin Already Added: ${handle}`);
+    const repoExists = await exists(octokit, classroom, handle);
+    const isAdmin = classroom.administrators.includes(handle);
+    const isAttendee = classroom.attendees.includes(handle);
+    const isRostered = isAdmin || isAttendee;
+    if (repoExists && classroom.provisioned.includes(handle)) {
+        if (isAdmin) {
+            coreExports.info(`Admin Already Added: ${handle}`);
+            return;
+        }
+        if (!isAttendee)
+            throw new Error(`Provisioned user is missing from the roster: ${handle}`);
+        await addUser$1(octokit, classroom, handle, 'maintainer');
+        classroom.administrators.push(handle);
+        classroom.pending = classroom.pending.filter((user) => user !== handle);
+        coreExports.info(`Promoted User to Admin: ${handle}`);
         return;
     }
+    if (repoExists) {
+        if (!isRostered || !classroom.pending.includes(handle))
+            throw new Error(`Repository Already Exists: ${handle}`);
+        throw new Error(`Incomplete Repository Requires Cleanup: ${handle}`);
+    }
+    // Record the handle before provisioning so the caller can persist failures.
+    if (!classroom.administrators.includes(handle))
+        classroom.administrators.push(handle);
+    beginProvisioning(classroom, handle);
     // Add the user to the team.
     await addUser$1(octokit, classroom, handle, 'maintainer');
     // Create and configure their repository.
-    const repo = await create(octokit, classroom, handle);
-    // Sleep 5s to wait for the repo to be created and initial commit pushed.
-    /* istanbul ignore next */
-    if (process.env.NODE_ENV !== 'test')
-        await new Promise((resolve) => setTimeout(resolve, 10000));
-    await configure(octokit, classroom, repo);
-    classroom.administrators.push(handle);
+    await createAndConfigureRepository(octokit, classroom, handle);
+    completeProvisioning(classroom, handle);
     coreExports.info(dedent `Added Admin to Classroom: ${handle}
 
   The following repository has been created for the user:
@@ -32513,6 +32622,8 @@ async function removeAdmin(octokit, classroom, handle) {
     // Remove from the attendees and administrators lists.
     classroom.attendees = classroom.attendees.filter((user) => user !== handle);
     classroom.administrators = classroom.administrators.filter((user) => user !== handle);
+    classroom.provisioned = classroom.provisioned.filter((user) => user !== handle);
+    classroom.pending = classroom.pending.filter((user) => user !== handle);
     coreExports.info(`Removed Admin from Class Request: ${handle}`);
 }
 
@@ -32603,6 +32714,12 @@ function getClassroom() {
             coreExports.error('Organization Field Invalid (Only Alphanumeric, Hyphen, Underscore)');
             return undefined;
         }
+        const administrators = parsedFile.administrators.map((admin) => admin.trim());
+        const attendees = parsedFile.attendees.map((attendee) => attendee.trim());
+        const provisioned = parsedFile.provisioned === undefined
+            ? [...new Set([...attendees, ...administrators])]
+            : parsedFile.provisioned.map((handle) => handle.trim());
+        const pending = (parsedFile.pending ?? []).map((handle) => handle.trim());
         return {
             githubServer: 
             /* istanbul ignore next */ parsedFile.githubServer?.trim() ||
@@ -32610,8 +32727,10 @@ function getClassroom() {
             organization: parsedFile.organization.trim(),
             customerName: parsedFile.customerName.trim(),
             customerAbbr: parsedFile.customerAbbr.trim().toUpperCase(),
-            administrators: parsedFile.administrators.map((admin) => admin.trim()),
-            attendees: parsedFile.attendees.map((attendee) => attendee.trim())
+            administrators,
+            attendees,
+            provisioned,
+            pending
         };
     }
     catch (error) {
@@ -32627,7 +32746,7 @@ function getClassroom() {
  * @param classroom Classroom
  */
 function updateClassroom(classroom) {
-    fs.writeFileSync(path.resolve('../classroom.json'), JSON.stringify(classroom, null, 2), 'utf8');
+    fs.writeFileSync(path.resolve(process.cwd(), 'classroom.json'), JSON.stringify(classroom, null, 2), 'utf8');
 }
 
 async function run() {
@@ -32668,17 +32787,12 @@ async function run() {
             await addAdmin(octokit, classroom, inputs.handle);
         else if (inputs.action === AllowedAction.REMOVE_ADMIN)
             await removeAdmin(octokit, classroom, inputs.handle);
-        updateClassroom(classroom);
-        /* istanbul ignore next */
-        for (const user of [...classroom.attendees, ...classroom.administrators]) {
-            const repoName = generateRepoName(classroom, user);
-            const repoPath = path.join(process.cwd(), repoName);
-            if (fs.existsSync(repoPath))
-                fs.rmSync(repoPath, { recursive: true, force: true });
-        }
     }
     catch (error) {
         coreExports.error(error);
+    }
+    finally {
+        updateClassroom(classroom);
     }
 }
 

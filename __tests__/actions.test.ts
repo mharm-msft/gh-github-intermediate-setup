@@ -165,11 +165,20 @@ describe('actions', () => {
 
   describe('addUser()', () => {
     it('Adds a user', async () => {
-      await actions.addUser(mocktokit, TEST_CLASSROOM, 'handle')
+      const classroom = {
+        ...TEST_CLASSROOM,
+        attendees: [...TEST_CLASSROOM.attendees],
+        provisioned: [...TEST_CLASSROOM.provisioned],
+        pending: [...TEST_CLASSROOM.pending]
+      }
+
+      await actions.addUser(mocktokit, classroom, 'handle')
 
       expect(teams_addUser).toHaveBeenCalled()
       expect(repos_create).toHaveBeenCalled()
       expect(repos_configure).toHaveBeenCalled()
+      expect(classroom.provisioned).toContain('handle')
+      expect(classroom.pending).not.toContain('handle')
     })
 
     it('Does not add an existing user', async () => {
@@ -180,6 +189,62 @@ describe('actions', () => {
       expect(teams_addUser).not.toHaveBeenCalled()
       expect(repos_create).not.toHaveBeenCalled()
       expect(repos_configure).not.toHaveBeenCalled()
+    })
+
+    it('Records a user before repository configuration', async () => {
+      const classroom = {
+        ...TEST_CLASSROOM,
+        attendees: [...TEST_CLASSROOM.attendees],
+        provisioned: [...TEST_CLASSROOM.provisioned],
+        pending: [...TEST_CLASSROOM.pending]
+      }
+      repos_exists.mockResolvedValueOnce(false).mockResolvedValueOnce(true)
+      repos_create.mockResolvedValueOnce('gh-int-tc-new-attendee')
+      repos_configure.mockRejectedValueOnce(new Error('Configuration failed'))
+
+      await expect(
+        actions.addUser(mocktokit, classroom, 'new-attendee')
+      ).rejects.toThrow('Configuration failed')
+      expect(classroom.attendees).toContain('new-attendee')
+      expect(classroom.provisioned).not.toContain('new-attendee')
+      expect(classroom.pending).toContain('new-attendee')
+      expect(mocktokit.rest.repos.delete).toHaveBeenCalledWith({
+        owner: classroom.organization,
+        repo: 'gh-int-tc-new-attendee'
+      })
+    })
+
+    it('Refuses to delete an incomplete attendee repository on retry', async () => {
+      const classroom = {
+        ...TEST_CLASSROOM,
+        attendees: [...TEST_CLASSROOM.attendees, 'partial-attendee'],
+        provisioned: [...TEST_CLASSROOM.provisioned],
+        pending: [...TEST_CLASSROOM.pending, 'partial-attendee']
+      }
+      repos_exists.mockResolvedValueOnce(true)
+      await expect(
+        actions.addUser(mocktokit, classroom, 'partial-attendee')
+      ).rejects.toThrow(
+        'Incomplete Repository Requires Cleanup: partial-attendee'
+      )
+      expect(mocktokit.rest.repos.delete).not.toHaveBeenCalled()
+      expect(repos_create).not.toHaveBeenCalled()
+      expect(repos_configure).not.toHaveBeenCalled()
+    })
+
+    it('Does not delete a rostered repository without a pending attempt', async () => {
+      const classroom = {
+        ...TEST_CLASSROOM,
+        attendees: [...TEST_CLASSROOM.attendees, 'collision-attendee'],
+        provisioned: [...TEST_CLASSROOM.provisioned],
+        pending: [...TEST_CLASSROOM.pending]
+      }
+      repos_exists.mockResolvedValueOnce(true)
+
+      await expect(
+        actions.addUser(mocktokit, classroom, 'collision-attendee')
+      ).rejects.toThrow('Repository Already Exists: collision-attendee')
+      expect(mocktokit.rest.repos.delete).not.toHaveBeenCalled()
     })
   })
 
@@ -193,6 +258,7 @@ describe('actions', () => {
       expect(mocktokit.rest.orgs.removeMember).toHaveBeenCalled()
       expect(mocktokit.rest.repos.delete).toHaveBeenCalled()
       expect(teams_removeUser).toHaveBeenCalled()
+      expect(TEST_CLASSROOM.provisioned).not.toContain('attendee1')
     })
 
     it('Does not remove a user who is an administrator', async () => {
@@ -225,11 +291,65 @@ describe('actions', () => {
 
   describe('addAdmin()', () => {
     it('Adds an admin', async () => {
-      await actions.addAdmin(mocktokit, TEST_CLASSROOM, 'handle')
+      const classroom = {
+        ...TEST_CLASSROOM,
+        administrators: [...TEST_CLASSROOM.administrators],
+        provisioned: [...TEST_CLASSROOM.provisioned],
+        pending: [...TEST_CLASSROOM.pending]
+      }
+
+      await actions.addAdmin(mocktokit, classroom, 'handle')
 
       expect(teams_addUser).toHaveBeenCalled()
       expect(repos_create).toHaveBeenCalled()
       expect(repos_configure).toHaveBeenCalled()
+      expect(classroom.provisioned).toContain('handle')
+      expect(classroom.pending).not.toContain('handle')
+    })
+
+    it('Promotes a provisioned attendee without recreating the repository', async () => {
+      const classroom = {
+        ...TEST_CLASSROOM,
+        attendees: [...TEST_CLASSROOM.attendees, 'promoted-user'],
+        administrators: [...TEST_CLASSROOM.administrators],
+        provisioned: [...TEST_CLASSROOM.provisioned, 'promoted-user'],
+        pending: [...TEST_CLASSROOM.pending]
+      }
+      repos_exists.mockResolvedValueOnce(true)
+
+      await actions.addAdmin(mocktokit, classroom, 'promoted-user')
+
+      expect(teams_addUser).toHaveBeenCalledWith(
+        mocktokit,
+        classroom,
+        'promoted-user',
+        'maintainer'
+      )
+      expect(repos_create).not.toHaveBeenCalled()
+      expect(classroom.administrators).toContain('promoted-user')
+    })
+
+    it('Records an admin before repository configuration', async () => {
+      const classroom = {
+        ...TEST_CLASSROOM,
+        administrators: [...TEST_CLASSROOM.administrators],
+        provisioned: [...TEST_CLASSROOM.provisioned],
+        pending: [...TEST_CLASSROOM.pending]
+      }
+      repos_exists.mockResolvedValueOnce(false).mockResolvedValueOnce(true)
+      repos_create.mockResolvedValueOnce('gh-int-tc-new-admin')
+      repos_configure.mockRejectedValueOnce(new Error('Configuration failed'))
+
+      await expect(
+        actions.addAdmin(mocktokit, classroom, 'new-admin')
+      ).rejects.toThrow('Configuration failed')
+      expect(classroom.administrators).toContain('new-admin')
+      expect(classroom.provisioned).not.toContain('new-admin')
+      expect(classroom.pending).toContain('new-admin')
+      expect(mocktokit.rest.repos.delete).toHaveBeenCalledWith({
+        owner: classroom.organization,
+        repo: 'gh-int-tc-new-admin'
+      })
     })
   })
 
@@ -251,6 +371,7 @@ describe('actions', () => {
       expect(mocktokit.rest.orgs.removeMember).toHaveBeenCalled()
       expect(mocktokit.rest.repos.delete).toHaveBeenCalled()
       expect(teams_removeUser).toHaveBeenCalled()
+      expect(TEST_CLASSROOM.provisioned).not.toContain('admin1')
     })
 
     it('Does not remove a user who is not found in administrators', async () => {

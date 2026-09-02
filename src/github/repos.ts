@@ -3,6 +3,7 @@ import type { ExecOptions } from '@actions/exec'
 import * as exec from '@actions/exec'
 import { Octokit } from '@octokit/rest'
 import fs from 'fs'
+import os from 'os'
 import path from 'path'
 import { Common } from '../enums.js'
 import type { Classroom } from '../types.js'
@@ -39,18 +40,34 @@ export async function create(
     owner: classroom.organization,
     name: generateRepoName(classroom, handle),
     description: `GitHub Intermediate - ${classroom.customerName}`,
-    include_all_branches: true,
+    include_all_branches: false,
     private: true
   })
 
-  // Grant the team access to the repository.
-  await octokit.rest.teams.addOrUpdateRepoPermissionsInOrg({
-    org: classroom.organization,
-    team_slug: generateTeamName(classroom),
-    owner: classroom.organization,
-    repo: response.data.name,
-    permission: 'admin'
-  })
+  try {
+    // Grant the team access to the repository.
+    await octokit.rest.teams.addOrUpdateRepoPermissionsInOrg({
+      org: classroom.organization,
+      team_slug: generateTeamName(classroom),
+      owner: classroom.organization,
+      repo: response.data.name,
+      permission: 'admin'
+    })
+  } catch (error) {
+    try {
+      await octokit.rest.repos.delete({
+        owner: classroom.organization,
+        repo: response.data.name
+      })
+    } catch (cleanupError) {
+      throw new AggregateError(
+        [error, cleanupError],
+        `Failed to grant team access and clean up repository: ${response.data.name}`
+      )
+    }
+
+    throw error
+  }
 
   return response.data.name
 }
@@ -75,6 +92,7 @@ export async function exists(
     })
   } catch (error: any) {
     if (error.status === 404) return false
+    throw error
   }
 
   return true
@@ -115,9 +133,11 @@ export async function configure(
     homepage: response.data.html_url
   })
 
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-int-'))
+
   // Configure the exec options.
   const options: exec.ExecOptions = {
-    cwd: process.cwd(),
+    cwd: tempRoot,
     listeners: {
       stdout: (data: Buffer) => {},
       stderr: (data: Buffer) => {
@@ -135,43 +155,72 @@ export async function configure(
     silent: true
   }
 
-  // Clone the repository to the local workspace.
-  await exec.exec(
-    'git',
-    [
-      'clone',
-      `https://x-access-token:${process.env.GITHUB_TOKEN!}@${classroom.githubServer}/${classroom.organization}/${repo}.git`
-    ],
-    options
-  )
+  let configurationError: unknown
+  try {
+    // Clone into an operation-owned temporary directory.
+    await exec.exec(
+      'git',
+      [
+        'clone',
+        `https://x-access-token:${process.env.GITHUB_TOKEN!}@${classroom.githubServer}/${classroom.organization}/${repo}.git`
+      ],
+      options
+    )
 
-  // Update the working directory to the checked out repository.
-  options.cwd = path.resolve(process.cwd(), repo)
+    // Update the working directory to the checked out repository.
+    options.cwd = path.join(tempRoot, repo)
 
-  // Update the remote URL to use the token.
-  await exec.exec(
-    'git',
-    [
-      'remote',
-      'set-url',
-      'origin',
-      `https://x-access-token:${process.env.GITHUB_TOKEN!}@${classroom.githubServer}/${classroom.organization}/${repo}.git`
-    ],
-    options
-  )
+    // Update the remote URL to use the token.
+    await exec.exec(
+      'git',
+      [
+        'remote',
+        'set-url',
+        'origin',
+        `https://x-access-token:${process.env.GITHUB_TOKEN!}@${classroom.githubServer}/${classroom.organization}/${repo}.git`
+      ],
+      options
+    )
 
-  // Configure the labs
-  await configureLab1(options, octokit, classroom)
-  await configureLab2(options, octokit, classroom)
-  await configureLab3(options, octokit, classroom)
-  await configureLab4(options, octokit, classroom)
-  await configureLab5(options, octokit, classroom)
-  await configureLab6(options, octokit, classroom)
-  await configureLab7(options, octokit, classroom)
-  await configureLab8(options, octokit, classroom)
-  await configureLab9(options, octokit, classroom)
-  await configureLab10(options, octokit, classroom)
-  await configureLab11(options, octokit, classroom)
+    // Configure the labs.
+    await configureLab1(options, octokit, classroom)
+    await configureLab2(options, octokit, classroom)
+    await configureLab3(options, octokit, classroom)
+    await configureLab4(options, octokit, classroom)
+    await configureLab5(options, octokit, classroom)
+    await configureLab6(options, octokit, classroom)
+    await configureLab7(options, octokit, classroom)
+    await configureLab8(options, octokit, classroom, repo)
+    await configureLab9(options, octokit, classroom)
+    await configureLab10(options, octokit, classroom)
+    await configureLab11(options, octokit, classroom)
+  } catch (error) {
+    configurationError = error
+  }
+
+  let cleanupError: unknown
+  try {
+    fs.rmSync(tempRoot, { recursive: true, force: true })
+  } catch (error) {
+    cleanupError = error
+  }
+
+  if (configurationError) {
+    if (cleanupError)
+      throw new AggregateError(
+        [configurationError, cleanupError],
+        `Failed to configure repository and remove temporary directory: ${repo}`
+      )
+    throw configurationError
+  }
+
+  if (cleanupError) {
+    const message =
+      cleanupError instanceof Error
+        ? cleanupError.message
+        : String(cleanupError)
+    core.warning(`Temporary directory cleanup failed: ${message}`)
+  }
 }
 
 /**
@@ -186,20 +235,20 @@ export async function deleteRepositories(
 ): Promise<void> {
   core.info(`Deleting Repositories: ${classroom.customerAbbr}`)
 
-  // Get the repositories for this request.
-  const prefix = `gh-int-${classroom.customerAbbr.toLowerCase()}-`
+  const handles = [
+    ...new Set([...classroom.attendees, ...classroom.administrators])
+  ]
 
-  const response = await octokit.rest.search.repos({
-    q: `org:${classroom.organization} ${prefix}`
-  })
+  // Delete only repositories derived from the persisted class roster.
+  for (const handle of handles) {
+    if (!(await exists(octokit, classroom, handle))) continue
 
-  // Delete the repositories for each member.
-  for (const repo of response.data.items) {
-    core.info(`\tDeleting Repository: ${repo.name}`)
+    const repo = generateRepoName(classroom, handle)
+    core.info(`\tDeleting Repository: ${repo}`)
 
     await octokit.rest.repos.delete({
       owner: classroom.organization,
-      repo: repo.name
+      repo
     })
   }
 }
@@ -265,7 +314,14 @@ export async function configureLab3(
     )
 
     // Remove the old file if it exists.
-    await exec.exec('rm', ['__tests__/keyboard_input_manager.test.ts'], options)
+    fs.rmSync(
+      path.join(
+        options.cwd as string,
+        '__tests__',
+        'keyboard_input_manager.test.ts'
+      ),
+      { force: true }
+    )
 
     // Write the new file.
     fs.writeFileSync(
@@ -323,7 +379,9 @@ export async function configureLab4(
   )
 
   // Remove the old file if it exists.
-  await exec.exec('rm', ['src/html_actuator.ts'], options)
+  fs.rmSync(path.join(options.cwd as string, 'src', 'html_actuator.ts'), {
+    force: true
+  })
 
   // Write the new file.
   fs.writeFileSync(`${options.cwd}/src/html_actuator.ts`, contents, 'utf8')
@@ -370,7 +428,26 @@ export async function configureLab6(
 ): Promise<void> {
   core.info('\tConfiguring Lab 6: Protect Main')
 
-  // Nothing needs to be done...
+  const labPath = path.join(options.cwd as string, 'labs', '6-protect-main.md')
+  const codeOwnerMarker = '@<organization>/<class-team>'
+  const classCodeOwner = `@${classroom.organization}/${generateTeamName(classroom)}`
+  const contents = fs.readFileSync(labPath, 'utf8')
+
+  if (!contents.includes(codeOwnerMarker))
+    throw new Error(`Lab 6 code owner marker not found: ${codeOwnerMarker}`)
+
+  fs.writeFileSync(
+    labPath,
+    contents.replaceAll(codeOwnerMarker, classCodeOwner),
+    'utf8'
+  )
+  await exec.exec('git', ['add', 'labs/6-protect-main.md'], options)
+  await exec.exec(
+    'git',
+    ['commit', '-m', 'Configure class team as code owner'],
+    options
+  )
+  await exec.exec('git', ['push'], options)
 }
 
 /**
@@ -400,7 +477,8 @@ export async function configureLab7(
 export async function configureLab8(
   options: ExecOptions,
   octokit: InstanceType<typeof Octokit>,
-  classroom: Classroom
+  classroom: Classroom,
+  repo: string
 ): Promise<void> {
   core.info('\tConfiguring Lab 8: Merge Conflicts')
 
@@ -421,7 +499,9 @@ export async function configureLab8(
     )
 
     // Remove the old file if it exists.
-    await exec.exec('rm', ['src/game_manager.ts'], options)
+    fs.rmSync(path.join(options.cwd as string, 'src', 'game_manager.ts'), {
+      force: true
+    })
 
     // Write the new file.
     fs.writeFileSync(`${options.cwd}/src/game_manager.ts`, contents, 'utf8')
@@ -445,7 +525,7 @@ export async function configureLab8(
     // Create the pull request.
     await octokit.rest.pulls.create({
       owner: classroom.organization,
-      repo: (options.cwd as string).split('/').pop() as string,
+      repo,
       head: `feature/tile-value-${i}`,
       base: 'main',
       title: 'Increase rate of tiles with value 4',
@@ -470,7 +550,9 @@ export async function configureLab8(
     )
 
     // Remove the old file if it exists.
-    await exec.exec('rm', ['src/game_manager.ts'], options)
+    fs.rmSync(path.join(options.cwd as string, 'src', 'game_manager.ts'), {
+      force: true
+    })
 
     // Write the new file.
     fs.writeFileSync(`${options.cwd}/src/game_manager.ts`, contents, 'utf8')
@@ -494,7 +576,7 @@ export async function configureLab8(
     // Create the pull request.
     await octokit.rest.pulls.create({
       owner: classroom.organization,
-      repo: (options.cwd as string).split('/').pop() as string,
+      repo,
       head: `feature/start-tiles-${i}`,
       base: 'main',
       title: 'Increase the number of starting tiles',
