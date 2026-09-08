@@ -1,0 +1,10 @@
+{
+  "githubServer": "github.com",
+  "organization": "DanPTheMan",
+  "customerName": "DanPTheMan Test Classroom",
+  "customerAbbr": "DPT",
+  "administrators": ["mharm-msft", "danparkerMS"],
+  "attendees": ["dannoparker"],
+  "provisioned": [],
+  "pending": []
+}
